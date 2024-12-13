@@ -24,7 +24,6 @@ def save_organizations(organizations: Dict):
 
 
 async def generate_embeddings(text: str):
-    """Generate both dense and sparse embeddings"""
     dense_emb = voyage_client.embed(texts=[text], model="voyage-multilingual-2").embeddings[0]
     sparse_emb = next(bm25_model.passage_embed([text]))
     return dense_emb, sparse_emb
