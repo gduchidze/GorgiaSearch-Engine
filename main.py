@@ -1,13 +1,12 @@
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Query
-from typing import Optional, Dict
+from typing import Dict
 import uuid
 from datetime import datetime
 import json
 import os
 import uvicorn
-from qdrant_client.grpc import FieldCondition, Direction, Filter
-
+from fastapi.middleware.cors import CORSMiddleware
 from app.config import ORGANIZATIONS_FILE, voyage_client, bm25_model, logger, qdrant_client
 from qdrant_client import models
 
@@ -41,6 +40,18 @@ async def lifespan(app_: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
+origins = [
+    "http://localhost:3000",
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 @app.post("/organizations")
 async def create_organization(org: dict):
@@ -63,141 +74,99 @@ async def get_organization(org_id: str):
     return organizations[org_id]
 
 
-@app.get("/gorgia/products/search")
-async def search_products(
-        query: str = Query(..., description="Search query text"),
-        limit: int = Query(10, ge=1, le=100, description="Number of results to return"),
-        category: Optional[str] = Query(None, description="Filter by category"),
-        min_price: Optional[float] = Query(None, ge=0, description="Minimum price"),
-        max_price: Optional[float] = Query(None, ge=0, description="Maximum price"),
-        min_discount: Optional[float] = Query(None, ge=0, le=100, description="Minimum discount percentage"),
-        offset: int = Query(0, ge=0, description="Offset for pagination"),
-        search_strategy: str = Query("rrf", description="Search strategy: dense, sparse, rrf, reranking")
+@app.post("/organizations/{org_id}/products")
+async def create_product(
+        org_id: str,
+        product: dict
 ):
+    if org_id not in organizations:
+        raise HTTPException(status_code=404, detail="Organization not found")
+    dense_emb, sparse_emb = await generate_embeddings(product.get("description", ""))
+    point_id = str(uuid.uuid4())
+    product_payload = {
+        **product,
+        "organization_id": org_id,
+        "created_at": datetime.now()
+    }
+
+    qdrant_client.upsert(
+        collection_name="gorgia_products",
+        points=[
+            models.PointStruct(
+                id=point_id,
+                vector=dense_emb,
+                sparse_vector=models.SparseVector(**sparse_emb.as_object()),
+                payload=product_payload
+            )
+        ]
+    )
+
+    return {
+        "id": point_id,
+        **product_payload
+    }
+
+
+@app.get("/organizations/{org_id}/products/search")
+async def search_products(
+        org_id: str,
+        query: str = Query(..., description="Search query text"),
+        limit: int = Query(50, ge=25, le=50, description="Number of results to return")
+):
+    if org_id not in organizations:
+        raise HTTPException(status_code=404, detail="Organization not found")
     try:
         dense_query_vector, sparse_query_vector = await generate_embeddings(query)
-        filter_conditions = []
-        if category:
-            filter_conditions.append(
-                models.FieldCondition(
-                    key="category",
-                    match={"value": category}
-                )
-            )
-        if min_price is not None:
-            filter_conditions.append(
-                models.FieldCondition(
-                    key="price",
-                    range=models.Range(
-                        gte=min_price
-                    )
-                )
-            )
-        if max_price is not None:
-            filter_conditions.append(
-                models.FieldCondition(
-                    key="price",
-                    range=models.Range(
-                        lte=max_price
-                    )
-                )
-            )
-        if min_discount is not None:
-            filter_conditions.append(
-                models.FieldCondition(
-                    key="discount_percentage",
-                    range=models.Range(
-                        gte=min_discount
-                    )
-                )
-            )
-
-        search_params = {
-            "collection_name": "gorgia_products",
-            "limit": limit,
-            "offset": offset,
-            "with_payload": True
-        }
-
-        if filter_conditions:
-            search_params["filter"] = models.Filter(
-                must=filter_conditions
-            )
-
-        if search_strategy == "dense":
-            search_params["query"] = dense_query_vector
-            search_params["using"] = "dense"
-            search_result = qdrant_client.query_points(**search_params)
-
-        elif search_strategy == "sparse":
-            search_params["query"] = models.SparseVector(**sparse_query_vector.as_object())
-            search_params["using"] = "sparse"
-            search_result = qdrant_client.query_points(**search_params)
-
-        elif search_strategy == "rrf":
-            prefetch = [
-                models.Prefetch(
-                    query=dense_query_vector,
-                    using="dense",
-                    limit=20,
-                ),
+        search_result = qdrant_client.query_points(
+            collection_name="gorgia_products",
+            with_payload=True,
+            limit=200,
+            score_threshold=0.49,
+            prefetch=[
                 models.Prefetch(
                     query=models.SparseVector(**sparse_query_vector.as_object()),
                     using="sparse",
-                    limit=20,
+                    limit=150,
+                    score_threshold=0.47
                 ),
-            ]
-            search_result = qdrant_client.query_points(
-                **search_params,
-                prefetch=prefetch,
-                query=models.FusionQuery(
-                    fusion=models.Fusion.RRF,
-                )
-            )
-
-        else:
-            prefetch = [
                 models.Prefetch(
                     query=dense_query_vector,
                     using="dense",
-                    limit=20,
-                ),
-                models.Prefetch(
-                    query=models.SparseVector(**sparse_query_vector.as_object()),
-                    using="sparse",
-                    limit=20,
-                ),
-            ]
-            search_result = qdrant_client.query_points(
-                **search_params,
-                prefetch=prefetch,
-                query=dense_query_vector,
-                using="dense"
+                    limit=150,
+                    score_threshold=0.47
+                )
+            ],
+            query=models.FusionQuery(
+                fusion=models.Fusion.DBSF
             )
+        )
 
         results = []
         for point in search_result.points:
-            result = {
-                "id": point.id,
-                "score": point.score,
-                **point.payload
-            }
-            results.append(result)
+            if point.score >= 0.49:
+                results.append({
+                    "name": point.payload.get("name"),
+                    "price": point.payload.get("price"),
+                    "old_price": point.payload.get("old_price"),
+                    "discount_percentage": point.payload.get("discount_percentage"),
+                    "image_url": point.payload.get("image_url"),
+                    "product_url": point.payload.get("product_url"),
+                    "score": point.score
+                })
+
+        results.sort(key=lambda x: x['score'], reverse=True)
+        final_limit = max(min(limit, len(results)), 50)
+        results = results[:final_limit]
 
         return {
-            "strategy": search_strategy,
             "total": len(results),
-            "offset": offset,
-            "limit": limit,
-            "results": results
+            "results": results,
         }
-
     except Exception as e:
         logger.error(f"Error in search_products: {str(e)}")
         raise HTTPException(
             status_code=500,
             detail=f"Search failed: {str(e)}"
         )
-
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
