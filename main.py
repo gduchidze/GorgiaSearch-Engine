@@ -40,7 +40,7 @@ async def lifespan(app_: FastAPI):
 app = FastAPI(lifespan=lifespan)
 
 origins = [
-    "http://localhost:3000",
+    "http://localhost:3000", "https://search-ui-smoky.vercel.app/"
 ]
 
 app.add_middleware(
