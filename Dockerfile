@@ -4,13 +4,8 @@ WORKDIR /app
 
 COPY ./requirements.txt requirements.txt
 
-RUN useradd -m -u 1000 appuser && \
-    chown -R appuser:appuser /app
-
 RUN pip install --no-cache-dir --upgrade -r requirements.txt && \
     pip install uvicorn
-
-USER appuser
 
 COPY . .
 
