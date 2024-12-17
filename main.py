@@ -128,16 +128,16 @@ async def search_products(
             final_score = point.score
 
             if features.get("ბრენდი") and \
-                    features["ბრენდი"].lower() in query.lower():
+                    features["ბრენდი"] in query:
                 final_score *= 1.25
 
             if features.get("დასახელება") and \
-                    features["დასახელება"].lower() in query.lower():
+                    features["დასახელება"] in query:
                 final_score *= 1.35
 
             dimensions = ["ფერი", "ქვეყანა", "წონა", "მოცულობა", "სიგრძე", "სიგანე"]
             for dim in dimensions:
-                if features.get(dim) and dim.lower() in query.lower():
+                if features.get(dim) and dim in query:
                     final_score *= 1.25
                     break
 
